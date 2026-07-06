@@ -49,6 +49,62 @@ export interface SearchResponse {
   results?: WobResult[];
 }
 
+interface RandomResponse {
+  data?: WobResult | null;
+  afterDate?: string;
+  beforeDate?: string;
+}
+
+type TranscriptEntry = {
+  speaker?: unknown;
+  text?: unknown;
+  content?: unknown;
+  body?: unknown;
+  quote?: unknown;
+  lines?: unknown;
+  data?: unknown;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function extractTextFromValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => extractTextFromValue(entry))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+
+  if (!isRecord(value)) {
+    return '';
+  }
+
+  const record = value as Record<string, unknown>;
+  const preferredKeys = ['text', 'content', 'body', 'quote', 'lines'];
+
+  for (const key of preferredKeys) {
+    const candidate = record[key];
+    const extracted = extractTextFromValue(candidate);
+
+    if (extracted) {
+      return extracted;
+    }
+  }
+
+  if ('data' in record) {
+    return extractTextFromValue(record.data);
+  }
+
+  return '';
+}
+
 export function parseDateInput(value: string) {
   const match = /^(\d{2})-(\d{2})-(\d{4})$/.exec(value);
 
@@ -111,58 +167,10 @@ export function truncateText(value: string, maxLength: number) {
 }
 
 export function extractWobText(value: unknown): string {
-  if (typeof value === 'string') {
-    return value.trim();
-  }
+  const text = extractTextFromValue(value);
 
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => {
-        if (typeof entry === 'string') {
-          return entry;
-        }
-
-        if (entry && typeof entry === 'object') {
-          const record = entry as Record<string, unknown>;
-          if (typeof record.text === 'string') {
-            return record.text;
-          }
-          if (typeof record.content === 'string') {
-            return record.content;
-          }
-        }
-
-        return '';
-      })
-      .filter(Boolean)
-      .join('\n')
-      .trim();
-  }
-
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-
-    const preferredKeys = ['text', 'content', 'body', 'quote', 'lines'];
-    for (const key of preferredKeys) {
-      const candidate = record[key];
-
-      if (typeof candidate === 'string') {
-        return candidate.trim();
-      }
-
-      if (Array.isArray(candidate)) {
-        const joined = extractWobText(candidate);
-        if (joined) {
-          return joined;
-        }
-      }
-    }
-
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return 'Contenido no disponible.';
-    }
+  if (text) {
+    return text;
   }
 
   return 'Contenido no disponible.';
@@ -269,40 +277,85 @@ function formatSpeakerName(value: unknown) {
   return 'Questioner';
 }
 
-function formatTranscriptEntry(entry: Record<string, unknown>) {
+function formatTranscriptEntry(entry: TranscriptEntry) {
   const speaker = formatSpeakerName(entry.speaker);
-  const rawText =
-    typeof entry.text === 'string'
-      ? entry.text
-      : typeof entry.content === 'string'
-        ? entry.content
-        : typeof entry.body === 'string'
-          ? entry.body
-          : '';
-
-  const normalizedText = htmlToMarkdown(rawText || 'Contenido no disponible.');
+  const rawText = extractTextFromValue(entry);
+  const normalizedText = htmlToMarkdown(String(rawText || 'Contenido no disponible.'));
 
   return `**${speaker}:** ${normalizedText}`;
 }
 
+function isTranscriptLikeObject(value: Record<string, unknown>) {
+  return (
+    'speaker' in value ||
+    'text' in value ||
+    'content' in value ||
+    'body' in value ||
+    'quote' in value ||
+    'lines' in value ||
+    'data' in value
+  );
+}
+
 export function renderWobTranscript(value: unknown) {
+  if (typeof value === 'string') {
+    const normalized = htmlToMarkdown(value);
+
+    return normalized || 'Contenido no disponible.';
+  }
+
   if (Array.isArray(value)) {
     const entries = value
       .map((entry) => {
-        if (!entry || typeof entry !== 'object') {
+        if (typeof entry === 'string') {
+          const normalized = htmlToMarkdown(entry);
+          return normalized ? `**Questioner:** ${normalized}` : null;
+        }
+
+        if (!isRecord(entry)) {
           return null;
         }
 
-        return formatTranscriptEntry(entry as Record<string, unknown>);
+        if (isTranscriptLikeObject(entry)) {
+          return formatTranscriptEntry(entry as TranscriptEntry);
+        }
+
+        const nestedData = extractTextFromValue(entry.data);
+        if (nestedData) {
+          const speaker = formatSpeakerName(entry.speaker);
+          return `**${speaker}:** ${htmlToMarkdown(nestedData)}`;
+        }
+
+        return null;
       })
-      .filter((entry): entry is string => Boolean(entry));
+      .filter((entry): entry is string => Boolean(entry && entry.trim()));
 
     if (entries.length > 0) {
       return entries.join('\n\n');
     }
   }
 
-  return normalizeWobText(value);
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+
+    if ('data' in record) {
+      const nestedData = record.data;
+
+      if (Array.isArray(nestedData) || typeof nestedData === 'string') {
+        return renderWobTranscript(nestedData);
+      }
+
+      if (isRecord(nestedData) && isTranscriptLikeObject(nestedData)) {
+        return formatTranscriptEntry(nestedData as TranscriptEntry);
+      }
+    }
+
+    if (isTranscriptLikeObject(record)) {
+      return formatTranscriptEntry(record as TranscriptEntry);
+    }
+  }
+
+  return 'Contenido no disponible.';
 }
 
 export function extractQuestionPreview(value: unknown) {
@@ -592,4 +645,63 @@ export async function fetchSearchPage({
   }
 
   return (await response.json()) as SearchResponse;
+}
+
+export async function fetchRecentWobs() {
+  const url = new URL('/wobs/recent', BACKEND_BASE_URL);
+
+  const response = await fetch(url, {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => '');
+    throw new Error(
+      `Backend response failed with status ${response.status}${errorBody ? `: ${errorBody}` : ''}`,
+    );
+  }
+
+  return (await response.json()) as SearchResponse;
+}
+
+export async function fetchRandomWob({
+  afterDate,
+  beforeDate,
+}: {
+  afterDate?: Date;
+  beforeDate?: Date;
+}): Promise<WobResult | null> {
+  const url = new URL('/wobs/random', BACKEND_BASE_URL);
+
+  if (afterDate) {
+    url.searchParams.set('afterDate', formatDateInput(afterDate));
+  }
+
+  if (beforeDate) {
+    url.searchParams.set('beforeDate', formatDateInput(beforeDate));
+  }
+
+  const response = await fetch(url, {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => '');
+    throw new Error(
+      `Backend response failed with status ${response.status}${errorBody ? `: ${errorBody}` : ''}`,
+    );
+  }
+
+  const payload: unknown = await response.json();
+
+  if (isRecord(payload) && 'afterDate' in payload && 'beforeDate' in payload) {
+    const randomResponse = payload as RandomResponse;
+    return randomResponse.data ?? null;
+  }
+
+  if (isRecord(payload)) {
+    return payload as WobResult;
+  }
+
+  return null;
 }

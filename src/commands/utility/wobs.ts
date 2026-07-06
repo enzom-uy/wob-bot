@@ -466,7 +466,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
     if (viewMode === 'detail') {
       await runWithErrorLogging(
-        () => interaction.editReply({ components: buildDetailComponents(true, currentDetailShared) }),
+        () =>
+          interaction.editReply({ components: buildDetailComponents(true, currentDetailShared) }),
         {
           step: 'collector_end_detail',
           reason,
